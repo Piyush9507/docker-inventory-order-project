@@ -15,7 +15,7 @@ pipeline {
         SSH_USER         = 'ec2-user'
         SSH_CREDENTIALS  = 'target-server-ssh-key'
 
-        DOCKER_NETWORK   = 'inventory-order-net'
+        DEPLOY_DIR       = '/home/ec2-user/inventory-order'
     }
 
     stages {
@@ -65,7 +65,25 @@ pipeline {
             }
         }
 
-        stage('Deploy to Jump Server') {
+        stage('Copy Docker Compose File') {
+            steps {
+                sshagent(credentials: [SSH_CREDENTIALS]) {
+                    sh '''
+                        set -e
+
+                        ssh -o StrictHostKeyChecking=accept-new \
+                            ${SSH_USER}@${JUMP_HOST} \
+                            "mkdir -p ${DEPLOY_DIR}"
+
+                        scp -o StrictHostKeyChecking=accept-new \
+                            docker-compose.yml \
+                            ${SSH_USER}@${JUMP_HOST}:${DEPLOY_DIR}/docker-compose.yml
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy Using Docker Compose') {
             steps {
                 sshagent(credentials: [SSH_CREDENTIALS]) {
                     sh '''
@@ -76,63 +94,43 @@ pipeline {
 
                             set -e
 
+                            echo 'Checking Docker Compose...'
+                            docker compose version
+
                             echo 'Logging in to ECR...'
 
                             aws ecr get-login-password --region ${AWS_REGION} | \
                             docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
-                            echo 'Pulling latest Inventory image...'
+                            cd ${DEPLOY_DIR}
 
-                            docker pull ${ECR_REGISTRY}/${INVENTORY_REPO}:${IMAGE_TAG}
+                            export ECR_REGISTRY=${ECR_REGISTRY}
+                            export IMAGE_TAG=${IMAGE_TAG}
 
-                            echo 'Pulling latest Order image...'
+                            echo 'Validating Compose configuration...'
+                            docker compose config -q
 
-                            docker pull ${ECR_REGISTRY}/${ORDER_REPO}:${IMAGE_TAG}
+                            echo 'Pulling latest images...'
+                            docker compose pull
 
-                            echo 'Creating Docker network if it does not exist...'
-
-                            docker network inspect ${DOCKER_NETWORK} >/dev/null 2>&1 || \
-                            docker network create ${DOCKER_NETWORK}
-
-                            echo 'Removing old containers...'
-
+                            echo 'Removing old manually deployed containers if present...'
                             docker rm -f inventory-service order-service >/dev/null 2>&1 || true
 
-                            echo 'Starting Inventory service...'
+                            echo 'Starting services with Docker Compose...'
+                            docker compose up -d --force-recreate --remove-orphans
 
-                            docker run -d \
-                                --name inventory-service \
-                                --restart unless-stopped \
-                                --network ${DOCKER_NETWORK} \
-                                -p 8082:8082 \
-                                ${ECR_REGISTRY}/${INVENTORY_REPO}:${IMAGE_TAG}
-
-                            echo 'Starting Order service...'
-
-                            docker run -d \
-                                --name order-service \
-                                --restart unless-stopped \
-                                --network ${DOCKER_NETWORK} \
-                                -p 8083:8083 \
-                                -e INVENTORY_SERVICE_URL=http://inventory-service:8082 \
-                                ${ECR_REGISTRY}/${ORDER_REPO}:${IMAGE_TAG}
-
-                            echo 'Waiting for containers to start...'
-
+                            echo 'Waiting for services...'
                             sleep 5
 
-                            echo 'Verifying Inventory container...'
+                            echo 'Checking Inventory service...'
+                            docker compose ps --status running -q inventory-service | grep -q .
 
-                            docker inspect -f '{{.State.Running}}' inventory-service | grep -q true
-
-                            echo 'Verifying Order container...'
-
-                            docker inspect -f '{{.State.Running}}' order-service | grep -q true
+                            echo 'Checking Order service...'
+                            docker compose ps --status running -q order-service | grep -q .
 
                             echo 'Deployment successful!'
 
-                            docker ps --filter name=inventory-service
-                            docker ps --filter name=order-service
+                            docker compose ps
                         "
                     '''
                 }
