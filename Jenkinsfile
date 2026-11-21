@@ -11,7 +11,7 @@ pipeline {
 
         IMAGE_TAG        = "${BUILD_NUMBER}"
 
-        JUMP_HOST        = '54.189.187.92'
+        JUMP_HOST        = '35.86.117.150'
         SSH_USER         = 'ec2-user'
         SSH_CREDENTIALS  = 'target-server-ssh-key'
 
